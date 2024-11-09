@@ -5,6 +5,7 @@ from interactive_pipe import interactive, interactive_pipeline, Image
 from interactive_pipe.data_objects.parameters import Parameters
 import argparse
 import mediapipe as mp
+from tqdm import tqdm
 from mediapipe.framework.formats import landmark_pb2
 from pathlib import Path
 _private.registered_controls_names = []
@@ -28,7 +29,7 @@ def select_frames(frame: int = 0, context: dict = {}) -> None:
 
 def load_all_poses(video_frames: list[Path], context: dict = {}) -> dict:
     pose_results = {}
-    for idx, frame in enumerate(video_frames):
+    for idx, frame in tqdm(enumerate(video_frames), total=len(video_frames), desc="Retrieving pose results"):
         pose_results[idx] = Parameters.load_yaml(frame.with_suffix(".yaml"))
     context["pose_results"] = pose_results
 
@@ -56,23 +57,26 @@ def overlay_pose(frame: np.ndarray, pose_result: dict, empty_background=False) -
         annotated_image = np.zeros(frame.shape, dtype=np.uint8)
     else:
         annotated_image = (frame.copy() * 255).astype("uint8")
-    recreated_landmarks = landmark_pb2.NormalizedLandmarkList(
-        landmark=[
-            landmark_pb2.NormalizedLandmark(
-                x=landmark['x'],
-                y=landmark['y'],
-                z=landmark['z'],
-                visibility=landmark['visibility']
-            ) for landmark in pose_result["landmarks"]
-        ]
-    )
-    dw_style = mp_drawing_styles.get_default_pose_landmarks_style()
-    mp_drawing.draw_landmarks(
-        annotated_image,
-        recreated_landmarks,
-        mp_pose.POSE_CONNECTIONS,
-        landmark_drawing_spec=dw_style
-    )
+    if "landmarks" in pose_result:
+        recreated_landmarks = landmark_pb2.NormalizedLandmarkList(
+            landmark=[
+                landmark_pb2.NormalizedLandmark(
+                    x=landmark['x'],
+                    y=landmark['y'],
+                    z=landmark['z'],
+                    visibility=landmark['visibility']
+                ) for landmark in pose_result["landmarks"]
+            ]
+        )
+        dw_style = mp_drawing_styles.get_default_pose_landmarks_style()
+        mp_drawing.draw_landmarks(
+            annotated_image,
+            recreated_landmarks,
+            mp_pose.POSE_CONNECTIONS,
+            landmark_drawing_spec=dw_style
+        )
+    else:
+        pass
     annotated_image = annotated_image/255.
     return annotated_image
 
@@ -99,20 +103,57 @@ def get_specific_body_tracks(context: dict = {}):
         context["track"][selected_body_part] = all_coordinates
 
 
-def highlight_tracks(frame, context: dict = {}):
-    annot_frame = frame.copy()
+def highlight_tracks(frame, sparkle_size=3, context: dict = {}):
+    # Create a copy of the frame for annotations
+    background = (frame.copy()*255).astype("uint8")
+    # Overlay for transparency effects
+    overlay = np.zeros_like(frame, dtype=np.uint8)
+
+    # Parameters for visual effects
+    window_size = 30
+    glow_intensity = 200  # Max intensity for the glow
+    sparkle_count = 200  # Number of sparkles per frame
+
     for selected_body_part, landmark_info in SELECTED_BODY_PART.items():
-        landmark_color = landmark_info["color"]
+        landmark_color = np.array(landmark_info["color"])
         all_coordinates = context["track"][selected_body_part]
-        window_size = 5
         current_idx = context["frame"]
-        start_idx = max(0, current_idx-window_size)
+
+        # Determine the trail segment
+        start_idx = max(0, current_idx - window_size)
         end_idx = min(len(all_coordinates), current_idx)
         selected_coordinates = all_coordinates[start_idx:end_idx]
+
+        # # Draw trails with a glowing effect
         for idx, (x, y) in enumerate(selected_coordinates):
-            cv2.circle(annot_frame, (int(
-                x*frame.shape[1]), int(y*frame.shape[0])), 8, landmark_color, -1)
-    return annot_frame
+            # Calculate the position and fading effect
+            pos = (int(x * frame.shape[1]), int(y * frame.shape[0]))
+            intensity = glow_intensity * (1 - idx / window_size)
+            color = tuple(
+                (landmark_color * (1 - idx / window_size)).astype(int))
+            # Draw glow (transparent circle with blur effect)
+            int_color = tuple(int(c) for c in color)
+            cv2.circle(overlay, pos, 20, (*int_color, int(intensity)), -1)
+
+        # Add sparkles near the current position
+        x, y = selected_coordinates[-1]
+        for _ in range(sparkle_count):
+            angle = np.random.uniform(0, 2 * np.pi)
+            radius = np.random.uniform(0.01, 0.05)
+            radius_pixels = radius*frame.shape[0]
+            sparkle_x = int(x * frame.shape[1] + np.cos(angle) * radius_pixels)
+            sparkle_y = int(y * frame.shape[0] + np.sin(angle) * radius_pixels)
+            sparkle_color = tuple(np.random.randint(50, 255, 3).tolist())
+            cv2.circle(
+                overlay,
+                (sparkle_x, sparkle_y),
+                sparkle_size,
+                (*sparkle_color, 0.5),
+                -1
+            )
+    alpha = 0.5  # Transparency factor
+    blended_frame = cv2.addWeighted(overlay, alpha, background, 1., 0)
+    return blended_frame/255.
 
 
 def process_video(video):
@@ -144,9 +185,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     preprocessed = Path(args.preprocessed_folder)
     frames = sorted(list(preprocessed.glob("*.jpg")))
-    interactive(frame=(0, [0, len(frames)-1]))(select_frames)
+    interactive(frame=(30, [0, len(frames)-1]))(select_frames)
     interactive(scale=(0.25, [0.1, 2.]))(select_scale)
     interactive(empty_background=(False,))(overlay_pose)
+    interactive(sparkle_size=(3, [1, 10]))(highlight_tracks)
     gui = args.gui
     interactive_pipeline(
         gui=gui,
