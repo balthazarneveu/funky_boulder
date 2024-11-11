@@ -28,10 +28,14 @@ def select_frames(frame: int = 0, context: dict = {}) -> None:
 
 
 def load_all_poses(video_frames: list[Path], context: dict = {}) -> dict:
-    pose_results = {}
-    for idx, frame in tqdm(enumerate(video_frames), total=len(video_frames), desc="Retrieving pose results"):
-        pose_results[idx] = Parameters.load_yaml(frame.with_suffix(".yaml"))
-    context["pose_results"] = pose_results
+    if "pose_results" not in context:
+        pose_results = {}
+        for idx, frame in tqdm(
+            enumerate(video_frames), total=len(video_frames), desc="Retrieving pose results"
+        ):
+            pose_results[idx] = Parameters.load_yaml(
+                frame.with_suffix(".yaml"))
+        context["pose_results"] = pose_results
 
 
 def select_scale(scale: float = 0.25, context: dict = {}) -> None:
@@ -82,6 +86,8 @@ def overlay_pose(frame: np.ndarray, pose_result: dict, empty_background=False) -
 
 
 def get_specific_body_tracks(context: dict = {}):
+    if "track" in context:
+        return
     context["track"] = {}
     all_pose_results = context["pose_results"]
     for selected_body_part, landmark_info in SELECTED_BODY_PART.items():
@@ -122,36 +128,44 @@ def highlight_tracks(frame, sparkle_size=3, context: dict = {}):
         # Determine the trail segment
         start_idx = max(0, current_idx - window_size)
         end_idx = min(len(all_coordinates), current_idx)
+        if end_idx == start_idx:
+            end_idx = start_idx + 1
         selected_coordinates = all_coordinates[start_idx:end_idx]
 
         # # Draw trails with a glowing effect
         for idx, (x, y) in enumerate(selected_coordinates):
             # Calculate the position and fading effect
             pos = (int(x * frame.shape[1]), int(y * frame.shape[0]))
-            intensity = glow_intensity * (1 - idx / window_size)
+            # intensity = glow_intensity * (1 - idx / window_size)
+            # color = tuple(
+            #     (landmark_color * (1 - idx / window_size)).astype(int))
+            intensity = glow_intensity * (idx / window_size)
             color = tuple(
-                (landmark_color * (1 - idx / window_size)).astype(int))
+                (landmark_color * (idx / window_size)).astype(int))
             # Draw glow (transparent circle with blur effect)
             int_color = tuple(int(c) for c in color)
             cv2.circle(overlay, pos, 20, (*int_color, int(intensity)), -1)
 
         # Add sparkles near the current position
         x, y = selected_coordinates[-1]
-        for _ in range(sparkle_count):
-            angle = np.random.uniform(0, 2 * np.pi)
-            radius = np.random.uniform(0.01, 0.05)
-            radius_pixels = radius*frame.shape[0]
-            sparkle_x = int(x * frame.shape[1] + np.cos(angle) * radius_pixels)
-            sparkle_y = int(y * frame.shape[0] + np.sin(angle) * radius_pixels)
-            sparkle_color = tuple(np.random.randint(50, 255, 3).tolist())
-            cv2.circle(
-                overlay,
-                (sparkle_x, sparkle_y),
-                sparkle_size,
-                (*sparkle_color, 0.5),
-                -1
-            )
-    alpha = 0.5  # Transparency factor
+        if sparkle_size > 0:
+            for _ in range(sparkle_count):
+                angle = np.random.uniform(0, 2 * np.pi)
+                radius = np.random.uniform(0.01, 0.05)
+                radius_pixels = radius*frame.shape[0]
+                sparkle_x = int(
+                    x * frame.shape[1] + np.cos(angle) * radius_pixels)
+                sparkle_y = int(
+                    y * frame.shape[0] + np.sin(angle) * radius_pixels)
+                sparkle_color = tuple(np.random.randint(50, 255, 3).tolist())
+                cv2.circle(
+                    overlay,
+                    (sparkle_x, sparkle_y),
+                    sparkle_size,
+                    (*sparkle_color, 0.1),
+                    -1
+                )
+    alpha = 0.8  # Transparency factor
     blended_frame = cv2.addWeighted(overlay, alpha, background, 1., 0)
     return blended_frame/255.
 
@@ -179,19 +193,45 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--gui", type=str,
-        choices=["qt", "gradio", "mpl"],
+        choices=["qt", "gradio", "mpl", "headless"],
         default="qt"
     )
     args = parser.parse_args()
     preprocessed = Path(args.preprocessed_folder)
     frames = sorted(list(preprocessed.glob("*.jpg")))
-    interactive(frame=(30, [0, len(frames)-1]))(select_frames)
-    interactive(scale=(0.25, [0.1, 2.]))(select_scale)
-    interactive(empty_background=(False,))(overlay_pose)
-    interactive(sparkle_size=(3, [1, 10]))(highlight_tracks)
+
     gui = args.gui
-    interactive_pipeline(
-        gui=gui,
-        cache=True,
-        safe_input_buffer_deepcopy=False
-    )(process_video)(frames)
+    live = True
+    if gui != "headless":
+        interactive(frame=(0, [0, len(frames)-1]))(select_frames)
+        interactive(scale=(0.25, [0.1, 2.]))(select_scale)
+        interactive(empty_background=(False,))(overlay_pose)
+        interactive(sparkle_size=(3, [1, 10]))(highlight_tracks)
+        interactive_pipeline(
+            gui=gui,
+            cache=True,
+            safe_input_buffer_deepcopy=False
+        )(process_video)(frames)
+    else:
+        import PIL.Image as PILImage
+        img_list = []
+        headless_pipeline = interactive_pipeline(
+            gui=None,
+            safe_input_buffer_deepcopy=False
+        )(process_video)
+        for img_idx in tqdm(range(0, len(frames), 10), desc="Generating frames"):
+            # Let's first override some of the default parameters.
+            headless_pipeline.parameters = {
+                "select_frames": {"frame": img_idx},
+                "select_scale": {"scale": 0.25},
+                "highlight_tracks": {"sparkle_size": 0},
+                "overlay_pose": {
+                    "empty_background": False
+                }
+            }
+            headless_pipeline(frames)
+            img = (255.*headless_pipeline.results[-1]).astype(np.uint8)
+            img_list.append(PILImage.fromarray(img))
+
+        img_list[0].save(f"animation_{preprocessed.stem}.gif", save_all=True,
+                         append_images=img_list[1:], duration=1, loop=1000)
