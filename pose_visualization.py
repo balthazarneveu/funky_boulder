@@ -8,7 +8,9 @@ import mediapipe as mp
 from tqdm import tqdm
 from mediapipe.framework.formats import landmark_pb2
 from pathlib import Path
+
 _private.registered_controls_names = []
+
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_pose = mp.solutions.pose
@@ -44,7 +46,7 @@ def select_scale(scale: float = 0.25, context: dict = {}) -> None:
 
 def load_frame(video_frames: list[Path], context: dict = {}) -> np.ndarray:
     idx = context["frame"]
-    return Image.from_file(video_frames[idx]).data
+    return Image.from_file(video_frames[idx], backend="pillow").data
 
 
 def resize_frame(frame, context: dict = {}) -> np.ndarray:
@@ -196,6 +198,16 @@ if __name__ == "__main__":
         choices=["qt", "gradio", "mpl", "headless"],
         default="qt"
     )
+    parser.add_argument(
+        "--trim", type=int, nargs=2,
+        default=None,
+        help="Trim the video to the specified range of frames"
+    )
+    parser.add_argument(
+        "--speedup", type=float,
+        default=1.0,
+        help="Speedup factor for the video"
+    )
     args = parser.parse_args()
     preprocessed = Path(args.preprocessed_folder)
     frames = sorted(list(preprocessed.glob("*.jpg")))
@@ -213,13 +225,18 @@ if __name__ == "__main__":
             safe_input_buffer_deepcopy=False
         )(process_video)(frames)
     else:
+        trim = args.trim
+        if trim is not None:
+            frames = frames[int(trim[0]):int(trim[1])]
         import PIL.Image as PILImage
         img_list = []
         headless_pipeline = interactive_pipeline(
             gui=None,
             safe_input_buffer_deepcopy=False
         )(process_video)
-        for img_idx in tqdm(range(0, len(frames), 10), desc="Generating frames"):
+        speedup = args.speedup
+        skip_factor = int(np.round(speedup))
+        for img_idx in tqdm(range(0, len(frames), skip_factor), desc="Generating frames"):
             # Let's first override some of the default parameters.
             headless_pipeline.parameters = {
                 "select_frames": {"frame": img_idx},
@@ -233,5 +250,5 @@ if __name__ == "__main__":
             img = (255.*headless_pipeline.results[-1]).astype(np.uint8)
             img_list.append(PILImage.fromarray(img))
 
-        img_list[0].save(f"animation_{preprocessed.stem}.gif", save_all=True,
+        img_list[0].save(f"animation_{preprocessed.stem}_speed={speedup:.1f}x.gif", save_all=True,
                          append_images=img_list[1:], duration=1, loop=1000)
